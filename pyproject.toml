@@ -1,0 +1,41 @@
+[project]
+name = "artist"
+version = "0.1.0"
+description = "Artist workspace"
+requires-python = ">=3.14"
+dependencies = [
+  "ruff==0.15.9",
+  "pyright==1.1.409",
+  "tach==0.35.0",
+  "pre-commit>=4.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4",
+  "pytest-asyncio>=0.24",
+  "httpx>=0.28",
+  "websockets>=15",
+]
+
+[tool.ruff]
+target-version = "py314"
+src = ["brushes", "palette", "painting"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+include = ["brushes", "palette", "painting"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.djlint]
+profile = "html"
+indent = 2
+ignore = "H030,H031"

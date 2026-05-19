@@ -1,0 +1,29 @@
+default_install_hook_types: [pre-commit]
+default_stages: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check brushes/ palette/ painting/
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format brushes/ palette/ painting/ --check
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: pyright
+        name: pyright
+        entry: uv run pyright brushes palette painting
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: tach
+        name: tach
+        entry: uv run tach check
+        language: system
+        pass_filenames: false

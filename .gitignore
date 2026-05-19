@@ -1,0 +1,25 @@
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# tooling caches
+.ruff_cache/
+.pyright_cache/
+.mypy_cache/
+.pytest_cache/
+.tach_cache/
+
+# macOS
+.DS_Store
+
+# editor / agent local
+.claude/settings.local.json
+.vscode/
+.idea/

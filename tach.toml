@@ -1,0 +1,13 @@
+source_roots = ["."]
+
+[[modules]]
+path = "palette"
+depends_on = []
+
+[[modules]]
+path = "brushes"
+depends_on = ["palette"]
+
+[[modules]]
+path = "painting"
+depends_on = ["brushes"]
