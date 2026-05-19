@@ -221,6 +221,11 @@
     }
   }
 
+  function applyClear() {
+    frameBuffer = [];
+    artistFilter.reset();
+  }
+
   const ws = new WebSocket(SERVER_WS);
   ws.addEventListener("message", (ev) => {
     let msg;
@@ -230,8 +235,7 @@
       case "open":     applyOpen(msg); break;
       case "snapshot": applyStrokes(msg.strokes); break;
       case "delta":    applyStrokes(msg.strokes); break;
-      // clear и неизвестные типы здесь игнорируются — обработка clear
-      // приходит в issue 003.
+      case "clear":    applyClear(); break;
       default: break;
     }
   });
