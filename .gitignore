@@ -21,5 +21,7 @@ __pycache__/
 
 # editor / agent local
 .claude/settings.local.json
+.claude/*.local.md
+.playwright-mcp/
 .vscode/
 .idea/

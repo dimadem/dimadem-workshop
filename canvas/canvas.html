@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>canvas live viewer</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #202020;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    background: #ffffff;
+    max-width: 100vw;
+    max-height: 100vh;
+    width: auto;
+    height: auto;
+    display: block;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas" width="0" height="0"></canvas>
+<script>
+(() => {
+  "use strict";
+
+  const SERVER_HTTP = "http://195.133.25.57";
+  const SERVER_WS   = "ws://195.133.25.57/canvas/ws";
+
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+
+  // Буфер штрихов текущего кадра. Очищается каждый тик renderer-а.
+  let frameBuffer = [];
+
+  function drawStroke(s) {
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = s.w;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(s.x1, s.y1);
+    ctx.lineTo(s.x2, s.y2);
+    ctx.stroke();
+  }
+
+  // 30fps render loop. Каждый кадр: clear → отрисовать буфер → очистить буфер.
+  // Так каждый штрих живёт ровно один кадр.
+  const FRAME_MS = 1000 / 30;
+  let lastFrame = 0;
+
+  function tick(now) {
+    requestAnimationFrame(tick);
+    if (now - lastFrame < FRAME_MS) return;
+    lastFrame = now;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const s of frameBuffer) drawStroke(s);
+    frameBuffer = [];
+  }
+  requestAnimationFrame(tick);
+
+  function applyOpen(msg) {
+    const c = msg.canvas;
+    if (!c || typeof c.width !== "number" || typeof c.height !== "number") return;
+    canvas.width = c.width;
+    canvas.height = c.height;
+  }
+
+  function applyStrokes(strokes) {
+    if (!Array.isArray(strokes)) return;
+    for (const s of strokes) frameBuffer.push(s);
+  }
+
+  const ws = new WebSocket(SERVER_WS);
+  ws.addEventListener("message", (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (!msg || typeof msg.type !== "string") return;
+    switch (msg.type) {
+      case "open":     applyOpen(msg); break;
+      case "snapshot": applyStrokes(msg.strokes); break;
+      case "delta":    applyStrokes(msg.strokes); break;
+      // clear и неизвестные типы здесь игнорируются — обработка clear
+      // приходит в issue 003.
+      default: break;
+    }
+  });
+  // На close / error — ничего: вьюер замирает, артист обновит F5 (см. PRD).
+
+  // Экспонируем константы и хуки для тестов (не для UI).
+  window.__viewer = { SERVER_HTTP, SERVER_WS, ws, canvas };
+})();
+</script>
+</body>
+</html>
