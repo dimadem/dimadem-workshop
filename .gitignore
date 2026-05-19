@@ -15,6 +15,7 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .tach_cache/
+.playwright-mcp/*
 
 # macOS
 .DS_Store
@@ -23,3 +24,4 @@ __pycache__/
 .claude/settings.local.json
 .vscode/
 .idea/
+
