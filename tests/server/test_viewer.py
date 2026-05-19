@@ -333,3 +333,154 @@ async def test_viewer_artist_filter_dropdown(
             assert ws_state == 1, f"WS expected OPEN (1), got {ws_state}"
         finally:
             await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_viewer_handle_clear_resets_state(
+    http: httpx.Client, http_server: str
+) -> None:
+    """`clear` сбрасывает буфер кадра, artistFilter и dropdown.
+
+    Сценарий: уникальный артист шлёт контрастный штрих, артист появляется в
+    dropdown, на холсте видны цветные пиксели. Затем эмулируется приход
+    `{type: 'clear'}` по WS (POST /canvas/clear требует CLEAR_SECRET, недоступного
+    локально; ws.dispatchEvent проверяет ту же ветку обработчика). После clear
+    dropdown пуст, следующий кадр — белый. Новые штрихи снова заполняют
+    dropdown с enabled=true, WS остаётся OPEN.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        pytest.skip("playwright is not installed")
+
+    artist_name = new_artist_name()
+    r = http.post("/canvas/register", json={"artist_name": artist_name})
+    assert r.status_code == 200, f"register failed: {r.status_code} {r.text}"
+
+    cfg = http.get("/canvas/config").json()
+    width, height = int(cfg["width"]), int(cfg["height"])
+    stroke = line(
+        100, 100, width - 100, height - 100, color="#ff0000", w=max(20, height // 24)
+    )
+
+    async def broadcast_once() -> None:
+        ws_url = "ws://195.133.25.57/canvas/ws"
+        async with websockets.connect(ws_url) as bc:
+            await wait_for(bc, "open")
+            await wait_for(bc, "snapshot")
+            for _ in range(8):
+                await bc.send(
+                    json.dumps({"artist_name": artist_name, "segments": [stroke]})
+                )
+                await asyncio.sleep(0.1)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        try:
+            page = await browser.new_page()
+            await page.goto(f"{http_server}/canvas/canvas.html")
+
+            await page.wait_for_function(
+                "() => window.__viewer && window.__viewer.ws"
+                " && window.__viewer.ws.readyState === 1"
+                " && window.__viewer.canvas.width > 0",
+                timeout=10_000,
+            )
+
+            # Замораживаем clearRect и заливаем фон белым, чтобы пиксели
+            # накапливались между кадрами — детект цветного штриха становится
+            # надёжным.
+            await page.evaluate(
+                """() => {
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+                    ctx.clearRect = () => {};
+                }"""
+            )
+
+            # 1) Шлём штрих → артист попадает в dropdown, на холсте красный.
+            await broadcast_once()
+            await page.wait_for_function(
+                "() => window.__viewer.artistFilter.entries()"
+                f"  .some(e => e[0] === {artist_name!r})",
+                timeout=10_000,
+            )
+            cx, cy = width // 2, height // 2
+            px_before = await page.evaluate(
+                f"""() => {{
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    const d = ctx.getImageData({cx}, {cy}, 1, 1).data;
+                    return [d[0], d[1], d[2], d[3]];
+                }}"""
+            )
+            r0, g0, b0, _ = px_before
+            assert r0 > 200 and g0 < 80 and b0 < 80, (
+                f"expected red stroke at canvas centre before clear, got {px_before}"
+            )
+
+            # 2) Эмулируем приход clear от сервера. Восстанавливаем clearRect,
+            # чтобы render-loop снова мог стереть кадр после clear.
+            await page.evaluate(
+                """() => {
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    delete ctx.clearRect;
+                    window.__viewer.ws.dispatchEvent(new MessageEvent('message', {
+                        data: JSON.stringify({ type: 'clear' }),
+                    }));
+                }"""
+            )
+
+            # 3) artistFilter и dropdown очищены.
+            await page.wait_for_function(
+                "() => window.__viewer.artistFilter.entries().length === 0",
+                timeout=5_000,
+            )
+            # dropdown открыт явно, чтобы прочитать его содержимое — кнопка
+            # остаётся на месте.
+            await page.click("#filter-toggle")
+            await page.wait_for_selector("#filter-list .empty", state="visible")
+            checkbox_count = await page.evaluate(
+                "() => document.querySelectorAll("
+                "  '#filter-list input[type=\"checkbox\"]'"
+                ").length"
+            )
+            assert checkbox_count == 0, (
+                f"expected dropdown to be empty after clear, got {checkbox_count} items"
+            )
+
+            # 4) Следующий кадр — белый (нет новых штрихов). Ждём минимум
+            # 2 кадра 30fps, плюс запас на latency.
+            await asyncio.sleep(0.2)
+            px_after_clear = await page.evaluate(
+                f"""() => {{
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    const d = ctx.getImageData({cx}, {cy}, 1, 1).data;
+                    return [d[0], d[1], d[2], d[3]];
+                }}"""
+            )
+            r1, g1, b1, a1 = px_after_clear
+            # После реального clearRect (без фоновой заливки) пиксель —
+            # прозрачный → CSS-фон #ffffff даёт белый через прозрачный alpha.
+            # Проверяем оба варианта: либо непрозрачный белый, либо прозрачный.
+            is_white_opaque = r1 > 240 and g1 > 240 and b1 > 240 and a1 == 255
+            is_transparent = a1 == 0
+            assert is_white_opaque or is_transparent, (
+                f"expected white/transparent canvas after clear, got {px_after_clear}"
+            )
+
+            # 5) WS-соединение по-прежнему открыто.
+            ws_state = await page.evaluate("() => window.__viewer.ws.readyState")
+            assert ws_state == 1, f"WS expected OPEN (1) after clear, got {ws_state}"
+
+            # 6) Новые штрихи после clear возвращают артиста в dropdown
+            # с enabled=true.
+            await broadcast_once()
+            await page.wait_for_function(
+                "() => { const e = window.__viewer.artistFilter.entries();"
+                f"  const me = e.find(x => x[0] === {artist_name!r});"
+                "  return me && me[1] === true; }",
+                timeout=10_000,
+            )
+        finally:
+            await browser.close()
