@@ -157,3 +157,179 @@ async def test_viewer_renders_incoming_stroke(
             )
         finally:
             await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_viewer_artist_filter_dropdown(
+    http: httpx.Client, http_server: str
+) -> None:
+    """Dropdown должен фильтровать штрихи по artist_name.
+
+    Сценарий: регистрируем двух уникальных артистов, шлём контрастные штрихи
+    от обоих по разным половинам канваса, открываем dropdown, снимаем галочку
+    у одного, шлём новую серию — проверяем, что только включённый артист
+    отрисован, выключенный — белый фон.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        pytest.skip("playwright is not installed")
+
+    artist_a = new_artist_name()
+    artist_b = new_artist_name()
+    for name in (artist_a, artist_b):
+        r = http.post("/canvas/register", json={"artist_name": name})
+        assert r.status_code == 200, f"register {name} failed: {r.status_code} {r.text}"
+
+    cfg = http.get("/canvas/config").json()
+    width, height = int(cfg["width"]), int(cfg["height"])
+    # Толстая линия по половинам, чтобы пиксель в центре каждой половины
+    # гарантированно попал на штрих.
+    thickness = max(40, height // 6)
+    quarter_w = width // 4
+    y_mid = height // 2
+    stroke_a = line(50, y_mid, quarter_w * 2 - 50, y_mid, color="#ff0000", w=thickness)
+    stroke_b = line(
+        quarter_w * 2 + 50, y_mid, width - 50, y_mid, color="#0000ff", w=thickness
+    )
+
+    async def broadcast(strokes_by_artist: dict[str, list[dict[str, Any]]]) -> None:
+        ws_url = "ws://195.133.25.57/canvas/ws"
+        async with websockets.connect(ws_url) as bc:
+            await wait_for(bc, "open")
+            await wait_for(bc, "snapshot")
+            for _ in range(8):
+                for name, segments in strokes_by_artist.items():
+                    await bc.send(
+                        json.dumps({"artist_name": name, "segments": segments})
+                    )
+                await asyncio.sleep(0.1)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.goto(f"{http_server}/canvas/canvas.html")
+
+            await page.wait_for_function(
+                "() => window.__viewer && window.__viewer.ws"
+                " && window.__viewer.ws.readyState === 1"
+                " && window.__viewer.canvas.width > 0",
+                timeout=10_000,
+            )
+
+            # Замораживаем clearRect и заливаем фон белым — пиксели накапливаются.
+            await page.evaluate(
+                """() => {
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+                    ctx.clearRect = () => {};
+                }"""
+            )
+
+            # 1) Шлём оба артиста — оба должны попасть в dropdown с enabled=true.
+            await broadcast({artist_a: [stroke_a], artist_b: [stroke_b]})
+            await page.wait_for_function(
+                "() => { const e = window.__viewer.artistFilter.entries();"
+                "  const names = e.map(x => x[0]);"
+                f"  return names.includes({artist_a!r})"
+                f"    && names.includes({artist_b!r}); }}",
+                timeout=10_000,
+            )
+            entries = await page.evaluate(
+                "() => window.__viewer.artistFilter.entries()"
+            )
+            entries_map = dict(entries)
+            assert entries_map.get(artist_a) is True
+            assert entries_map.get(artist_b) is True
+
+            # 2) Открываем dropdown, проверяем что чекбоксы появились.
+            await page.click("#filter-toggle")
+            await page.wait_for_selector(
+                f"#filter-list input[data-artist={artist_a!r}]", state="visible"
+            )
+            await page.wait_for_selector(
+                f"#filter-list input[data-artist={artist_b!r}]", state="visible"
+            )
+
+            # 3) Снимаем галочку у artist_b и убеждаемся, что состояние ушло
+            # в artistFilter.
+            await page.click(f"#filter-list input[data-artist={artist_b!r}]")
+            await page.wait_for_function(
+                f"() => window.__viewer.artistFilter.isEnabled({artist_a!r}) === true"
+                f" && window.__viewer.artistFilter.isEnabled({artist_b!r}) === false",
+                timeout=5_000,
+            )
+
+            # 4) Перед новым раундом — сбрасываем накопленные пиксели.
+            await page.evaluate(
+                """() => {
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+                }"""
+            )
+
+            # 5) Шлём новую серию от обоих — выключенный (artist_b) рисоваться
+            # не должен; включённый (artist_a) рисуется.
+            await broadcast({artist_a: [stroke_a], artist_b: [stroke_b]})
+
+            # Подождём пару кадров, чтобы накопить штрихи.
+            await asyncio.sleep(0.5)
+
+            px_a = await page.evaluate(
+                f"""() => {{
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    const d = ctx.getImageData({quarter_w}, {y_mid}, 1, 1).data;
+                    return [d[0], d[1], d[2], d[3]];
+                }}"""
+            )
+            px_b = await page.evaluate(
+                f"""() => {{
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    const d = ctx.getImageData({quarter_w * 3}, {y_mid}, 1, 1).data;
+                    return [d[0], d[1], d[2], d[3]];
+                }}"""
+            )
+            r_a, g_a, b_a, _ = px_a
+            r_b, g_b, b_b, _ = px_b
+            assert r_a > 200 and g_a < 80 and b_a < 80, (
+                f"expected enabled artist_a (red) at left half, got {px_a}"
+            )
+            assert r_b > 240 and g_b > 240 and b_b > 240, (
+                f"expected disabled artist_b → white at right half, got {px_b}"
+            )
+
+            # 6) Возвращаем галочку — следующая серия снова рисует artist_b.
+            await page.click(f"#filter-list input[data-artist={artist_b!r}]")
+            await page.wait_for_function(
+                f"() => window.__viewer.artistFilter.isEnabled({artist_b!r}) === true",
+                timeout=5_000,
+            )
+            await page.evaluate(
+                """() => {
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+                }"""
+            )
+            await broadcast({artist_b: [stroke_b]})
+            await asyncio.sleep(0.5)
+            px_b2 = await page.evaluate(
+                f"""() => {{
+                    const ctx = window.__viewer.canvas.getContext('2d');
+                    const d = ctx.getImageData({quarter_w * 3}, {y_mid}, 1, 1).data;
+                    return [d[0], d[1], d[2], d[3]];
+                }}"""
+            )
+            r_b2, g_b2, b_b2, _ = px_b2
+            assert b_b2 > 200 and r_b2 < 80 and g_b2 < 80, (
+                f"expected re-enabled artist_b (blue) at right half, got {px_b2}"
+            )
+
+            # 7) WS-соединение осталось живым.
+            ws_state = await page.evaluate("() => window.__viewer.ws.readyState")
+            assert ws_state == 1, f"WS expected OPEN (1), got {ws_state}"
+        finally:
+            await browser.close()
